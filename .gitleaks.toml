@@ -1,0 +1,20 @@
+# Gitleaks config — extends default rules, allowlist paths
+# Used by both pre-commit hook và manual gitleaks run
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow example secrets trong docs và test files"
+paths = [
+    # Docs có example secrets để dạy "code lỗi mẫu"
+    '''(^|.*/)\.claude/skills/.+/rules/.+\.md$''',
+    # .env example với placeholder credentials
+    '''(^|.*/)\.env\.example$''',
+    # Community Semgrep rules — intentionally vulnerable code patterns
+    '''(^|.*/)\.semgrep/rules/community/.*''',
+    # Setup script backups
+    '''.*\.backup-\d+(/.*)?$''',
+    # CI test fixtures — intentionally vulnerable code for testing rules
+    '''(^|.*/)tests/ci/.*''',
+]

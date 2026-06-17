@@ -1,0 +1,81 @@
+# ============================================
+# DolphinEx Secure Starter — .gitignore
+# ============================================
+
+# Secrets — ABSOLUTELY MUST NOT COMMIT
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+service-account*.json
+.secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn-integrity
+.pnp.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Test artifacts
+coverage/
+.nyc_output/
+
+# Build artifacts
+out/
+target/
+*.class
+
+# OS
+Thumbs.db
+desktop.ini
+
+# Security scan artifacts (don't commit findings, only fix them)
+.semgrep_cache/
+.bandit-results
+.trivy-cache/
+
+# Security scan reports — KHÔNG commit
+security-reports/
+
+# Setup script backups
+*.backup-*
+*.backup-*/

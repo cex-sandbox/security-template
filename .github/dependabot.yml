@@ -1,0 +1,19 @@
+# Dependabot — tự động đề xuất nâng version, tránh version drift
+# (bài học thực tế: bandit 1.7.10 silent-skip trên Python 3.14 — 12/06/2026)
+#
+# Lưu ý: Dependabot KHÔNG hỗ trợ pre-commit hooks (.pre-commit-config.yaml)
+# → review thủ công hàng quý, hoặc cân nhắc Renovate (có hỗ trợ pre-commit)
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies", "ci"]
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies", "python"]

@@ -1,0 +1,1141 @@
+# CEX Custom Semgrep Rules — v1.2.1
+# CEX-specific security patterns không có trong rule chuẩn
+# 44 rules | languages: python, javascript, typescript, kotlin, swift
+# categories: auth, wallet, compliance, crypto, infra, injection, mobile, race-condition
+
+rules:
+
+  # ============================================
+  # 1. FLOAT FOR MONEY — Cực nguy hiểm cho CEX
+  # ============================================
+  - id: security-float-for-money
+    metadata:
+      cwe: ["CWE-682: Incorrect Calculation"]
+      owasp: ["A04:2021 - Insecure Design"]
+      category: security
+      confidence: HIGH
+      references: ["docs/wallet.md"]
+    message: |
+      Sử dụng float cho money/balance/amount gây sai số floating-point.
+      Dùng Decimal (Python), BigDecimal (Java), decimal.js (Node).
+    severity: WARNING
+    languages: [python]
+    pattern-either:
+      # float() conversion với biến tiền tệ
+      - patterns:
+          - pattern: $VAR = float($AMOUNT)
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: '(?i)(amount|balance|price|fee|total|value|withdraw|deposit)'
+      # float type annotation
+      - patterns:
+          - pattern: "$VAR: float = ..."
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: '(?i)(amount|balance|price|fee|total|value)'
+      # Arithmetic với float literal (0.1, 0.01...)
+      - patterns:
+          - pattern: $VAR = $X * $FLOAT_LIT
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: '(?i)(amount|balance|price|fee|total)'
+          - metavariable-regex:
+              metavariable: $FLOAT_LIT
+              regex: '^\d+\.\d+'
+    fix: |
+      from decimal import Decimal
+      # Use Decimal instead of float for money
+
+  # ============================================
+  # 2. RACE CONDITION — Balance check without lock
+  # ============================================
+  - id: security-balance-check-no-lock
+    metadata:
+      cwe: ["CWE-362: Race Condition (TOCTOU)"]
+      owasp: ["A04:2021 - Insecure Design"]
+      category: security
+      confidence: HIGH
+      references: ["docs/wallet.md"]
+    message: |
+      Đọc balance rồi update mà không có row-level lock = race condition (double-spend).
+      Dùng SELECT ... FOR UPDATE trong transaction, hoặc UPDATE ... WHERE balance >= amount.
+    severity: ERROR
+    languages: [python]
+    pattern-either:
+      # Pattern A: balance từ DB method call trực tiếp ($DB.$QUERY)
+      - patterns:
+          - pattern: |
+              $BAL = $DB.$QUERY(...)
+              ...
+              if $BAL >= $AMT:
+                  ...
+                  $DB.$EXEC(...)
+          - metavariable-regex:
+              metavariable: $BAL
+              regex: '(?i)(balance|bal|amount|amt|avail)'
+      # Pattern B: balance từ helper function ($FUNC không phải method) — e.g. get_wallet_balance(conn, uid)
+      - patterns:
+          - pattern: |
+              $BAL = $FUNC(...)
+              ...
+              if $BAL >= $AMT:
+                  ...
+                  $DB.$EXEC(...)
+          - metavariable-regex:
+              metavariable: $BAL
+              regex: '(?i)(balance|bal|amount|amt|avail)'
+      # Pattern C: explicit db.query / db.execute fallback
+      - pattern: |
+          $BAL = $DB.query(...)
+          ...
+          if $BAL >= $AMT:
+              ...
+              $DB.execute(...)
+
+  # ============================================
+  # 3. WEAK CRYPTO
+  # ============================================
+  - id: security-weak-hash
+    metadata:
+      cwe: ["CWE-328: Use of Weak Hash"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/crypto.md"]
+    message: |
+      MD5/SHA-1 đã bị broken. Dùng SHA-256/SHA-3 cho integrity,
+      bcrypt/argon2 cho password.
+    severity: ERROR
+    languages: [python]
+    pattern-either:
+      - pattern: hashlib.md5(...)
+      - pattern: hashlib.sha1(...)
+      - pattern: hashlib.new("md5", ...)
+      - pattern: hashlib.new("sha1", ...)
+      - pattern: hashlib.new('md5', ...)
+      - pattern: hashlib.new('sha1', ...)
+      - pattern: |
+          from hashlib import md5
+      - pattern: |
+          from hashlib import sha1
+      # hmac.new/hmac.HMAC với MD5/SHA-1 làm digestmod (function reference, không phải call)
+      - pattern: hmac.new($KEY, $MSG, hashlib.md5)
+      - pattern: hmac.new($KEY, $MSG, hashlib.sha1)
+      - pattern: hmac.new($KEY, digestmod=hashlib.md5)
+      - pattern: hmac.new($KEY, digestmod=hashlib.sha1)
+      - pattern: hmac.HMAC($KEY, $MSG, hashlib.md5)
+      - pattern: hmac.HMAC($KEY, $MSG, hashlib.sha1)
+
+  - id: security-weak-random
+    metadata:
+      cwe: ["CWE-338: Use of Cryptographically Weak PRNG"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/crypto.md"]
+    message: |
+      `random` module KHÔNG cryptographically secure.
+      Dùng `secrets` cho token, OTP, session ID, salt.
+    severity: WARNING
+    languages: [python]
+    patterns:
+      - pattern: random.$FUNC(...)
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: '(random|randint|choice|sample|uniform)'
+
+  - id: security-weak-random-js
+    metadata:
+      cwe: ["CWE-338: Use of Cryptographically Weak PRNG"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/crypto.md"]
+    message: |
+      Math.random() KHÔNG cryptographically secure.
+      Dùng crypto.randomBytes() hoặc crypto.randomUUID() cho token/OTP/session.
+    severity: WARNING
+    languages: [javascript, typescript]
+    pattern: Math.random()
+
+  # ============================================
+  # 4. SQL INJECTION via f-string
+  # ============================================
+  - id: security-sql-fstring
+    metadata:
+      cwe: ["CWE-89: SQL Injection"]
+      owasp: ["A03:2021 - Injection"]
+      category: security
+      confidence: HIGH
+      references: ["docs/database.md"]
+    message: |
+      F-string vào SQL = SQL Injection. Dùng parameterized query (%s/?) hoặc SQLAlchemy bindparam.
+      Đặc biệt nguy hiểm với SQLAlchemy text() — không dùng f-string làm argument cho text().
+    severity: ERROR
+    languages: [python]
+    pattern-either:
+      - pattern: $DB.execute(f"...")
+      - pattern: $DB.executemany(f"...")
+      - pattern: $DB.query(f"...")
+      - pattern: $DB.query_one(f"...")
+      # SQLAlchemy text() wrapper — cũng bị SQL injection nếu dùng f-string
+      - pattern: $DB.execute(text(f"..."))
+      - pattern: $DB.execute(text(f"..."), ...)
+      - pattern: $DB.execute(sqlalchemy.text(f"..."))
+      - pattern: text(f"...")
+      - patterns:
+          - pattern: $Q = f"..."
+          - pattern-regex: '(?i)f["\x27].*(SELECT|INSERT|UPDATE|DELETE\s+FROM)\s'
+          - pattern-inside: |
+              def $FUNC(...):
+                ...
+                $DB.execute($Q)
+                ...
+
+  # ============================================
+  # 5. INSECURE DESERIALIZATION
+  # ============================================
+  - id: security-pickle-load
+    metadata:
+      cwe: ["CWE-502: Deserialization of Untrusted Data"]
+      owasp: ["A08:2021 - Software and Data Integrity Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/secure-checklist.md"]
+    message: |
+      pickle.load() trên untrusted data = RCE.
+      Dùng json + jsonschema thay thế.
+    severity: ERROR
+    languages: [python]
+    pattern-either:
+      - pattern: pickle.load(...)
+      - pattern: pickle.loads(...)
+
+  # ============================================
+  # 6. COMMAND INJECTION
+  # ============================================
+  - id: security-shell-injection
+    metadata:
+      cwe: ["CWE-78: OS Command Injection"]
+      owasp: ["A03:2021 - Injection"]
+      category: security
+      confidence: HIGH
+      references: ["docs/secure-checklist.md"]
+    message: |
+      subprocess với shell=True + user input = Command Injection.
+      Dùng list args và shell=False.
+    severity: ERROR
+    languages: [python]
+    pattern-either:
+      - pattern: subprocess.run($CMD, shell=True, ...)
+      - pattern: subprocess.call($CMD, shell=True, ...)
+      - pattern: subprocess.Popen($CMD, shell=True, ...)
+      - pattern: os.system($CMD)
+      - pattern: os.popen($CMD)
+
+  # ============================================
+  # 7. HARDCODED SECRETS
+  # ============================================
+  - id: security-hardcoded-secret
+    metadata:
+      cwe: ["CWE-798: Use of Hard-coded Credentials"]
+      owasp: ["A07:2021 - Identification and Authentication Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/crypto.md"]
+    message: |
+      Hardcoded secret/key/token. Dùng env variable hoặc Secrets Manager.
+    severity: ERROR
+    languages: [python, javascript, typescript, kotlin, swift]
+    pattern-either:
+      - patterns:
+          - pattern: $VAR = "$VALUE"
+          - metavariable-regex:
+              metavariable: $VAR
+              # Matches vars where a sensitive keyword is a full word-segment
+              # e.g. SECRET, REPORT_SECRET, MY_API_KEY, JWT_SIGNING_KEY
+              # Uses fullmatch semantics: (?:^|.*_) covers prefix, (?:_.*|$) covers suffix
+              regex: '(?i)(?:^|.*_)(secret|password|api_?key|token|private_?key|auth_?key|access_?key|signing_?key)(?:_.*|$)'
+          - metavariable-regex:
+              metavariable: $VALUE
+              # Requires 8+ non-whitespace chars with at least one digit or special char
+              # Avoids FP on placeholder strings like "your-secret-here" or "change_me"
+              regex: '^(?=.*[\d\W_])[^\s]{8,}$'
+      - patterns:
+          - pattern: $VAR = '$VALUE'
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: '(?i)(?:^|.*_)(secret|password|api_?key|token|private_?key|auth_?key|access_?key|signing_?key)(?:_.*|$)'
+          - metavariable-regex:
+              metavariable: $VALUE
+              regex: '^(?=.*[\d\W_])[^\s]{8,}$'
+
+  # ============================================
+  # 8. JWT NONE ALGORITHM
+  # ============================================
+  - id: security-jwt-alg-none
+    metadata:
+      cwe: ["CWE-347: Improper Verification of Cryptographic Signature"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/auth.md"]
+    message: |
+      JWT verify với algorithms=["none"] = bypass auth.
+      Specify thuật toán cụ thể (HS256, RS256, ES256).
+    severity: ERROR
+    languages: [python, javascript]
+    pattern-either:
+      - patterns:
+          - pattern: jwt.decode(...)
+          - pattern-regex: 'algorithms\s*=\s*\[\s*["\x27]none["\x27]\s*\]'
+      - patterns:
+          - pattern: jwt.decode(...)
+          - pattern-regex: 'verify\s*=\s*False'
+      # PyJWT 2.x style — options={"verify_signature": False}
+      - patterns:
+          - pattern: jwt.decode(...)
+          - pattern-regex: '["\x27]verify_signature["\x27]\s*:\s*False'
+      - patterns:
+          - pattern: jwt.verify(...)
+          - pattern-regex: '["\x27]none["\x27]'
+
+  # ============================================
+  # 9. NO OWNERSHIP CHECK — IDOR / BOLA
+  # ============================================
+  - id: security-idor-no-ownership
+    metadata:
+      cwe: ["CWE-639: Authorization Bypass Through User-Controlled Key"]
+      owasp: ["A01:2021 - Broken Access Control"]
+      category: security
+      confidence: HIGH
+      references: ["docs/auth.md"]
+    message: |
+      Query user-scoped resource (wallet/order/withdrawal) cần WHERE user_id = current_user.id
+      để chống IDOR/BOLA. Trả về 404 (không 403) khi resource thuộc user khác.
+    severity: WARNING
+    languages: [python]
+    pattern-either:
+      - patterns:
+          - pattern-either:
+              - pattern: $DB.query($SQL, ...)
+              - pattern: $DB.query_one($SQL, ...)
+              - pattern: $DB.execute($SQL, ...)
+          - metavariable-regex:
+              metavariable: $SQL
+              # Negative lookahead: bỏ qua nếu query ĐÃ có user_id/account_id filter
+              regex: '(?i)^(?!.*\buser_?id\b).*FROM\s+(wallets|orders|withdrawals|deposits|bank_accounts)\b.*WHERE\b.*\bid\s*=\s*[\?%]s?'
+
+  # ============================================
+  # 10. LOGGING SENSITIVE DATA
+  # ============================================
+  - id: security-log-sensitive
+    metadata:
+      cwe: ["CWE-532: Insertion of Sensitive Information into Log File"]
+      owasp: ["A09:2021 - Security Logging and Monitoring Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/data-protection.md"]
+    message: |
+      KHÔNG log password/token/secret/private_key/CCCD/biometric/device fingerprint —
+      credential/PII leak. Mask trước khi log (xem mask_cccd, mask_email).
+      Nếu đã mask: thêm # nosemgrep: security-log-sensitive  # masked via mask_cccd()
+    severity: WARNING
+    languages: [python, javascript]
+    pattern-either:
+      - patterns:
+          - pattern: |
+              $LOG.$LEVEL(..., $VAR, ...)
+          - metavariable-regex:
+              metavariable: $LOG
+              regex: '(logger|log|console)'
+          - metavariable-regex:
+              metavariable: $VAR
+              # fullmatch — keyword as whole word or word-segment (camelCase / snake_case)
+              regex: '(?i)(?:^|.*_)(password|token|secret|api_?key|private_?key|jwt|authorization|auth_token|cccd|biometric|seed_?phrase|fund_password|imei|wlan_mac|android_id)(?:_.*|$)'
+      - patterns:
+          # Dùng .*? thay vì [^"'] để match f-string có dict key access như {user['sub']}
+          - pattern-regex: '(?:logger|log|console)\.(?:info|debug|warning|warn|error)\s*\(\s*f["\x27].*?(?i:(?:token|auth(?:_?key|orization)?|password|otp|secret|api_?key|private_?key|cccd|biometric|seed_?phrase|fund_password|imei|wlan_mac|android_id))\s*='
+
+  # ============================================
+  # 11. AES-ECB MODE — Forbidden by CEX encryption guide
+  # ============================================
+  - id: security-aes-ecb-mode
+    metadata:
+      cwe: ["CWE-327: Use of a Broken or Risky Cryptographic Algorithm"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/crypto.md"]
+    message: |
+      AES-ECB không có semantic security — cùng plaintext luôn tạo cùng ciphertext.
+      TUYỆT ĐỐI CẤM tại CEX (encryption-best-practices §3.2). Dùng AES-256-GCM.
+    severity: ERROR
+    languages: [python]
+    pattern-either:
+      - pattern: AES.new($KEY, AES.MODE_ECB)
+      - pattern: AES.new($KEY, AES.MODE_ECB, ...)
+      - pattern-regex: 'modes\.ECB\s*\('
+
+  # ============================================
+  # 12. AES-GCM NONCE REUSE — Catastrophic failure
+  # ============================================
+  - id: security-aes-gcm-static-nonce
+    metadata:
+      cwe: ["CWE-323: Reusing a Nonce, Key Pair in Encryption"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/crypto.md"]
+    message: |
+      Tái sử dụng nonce với cùng key trong AES-GCM = plaintext recovery.
+      Phải dùng os.urandom(12) MỖI lần encrypt.
+    severity: WARNING
+    languages: [python]
+    pattern-either:
+      # cryptography lib: AESGCM(key).encrypt(static_nonce, data, aad)
+      - patterns:
+          - pattern: |
+              $NONCE = b"..."
+              ...
+              $AESGCM.encrypt($NONCE, ...)
+      - patterns:
+          - pattern: |
+              $NONCE = b"\x00" * $N
+              ...
+              $AESGCM.encrypt($NONCE, ...)
+      # Cryptodome lib: AES.new(key, MODE_GCM, nonce=static_nonce)
+      - patterns:
+          - pattern: |
+              $NONCE = b"..."
+              ...
+              AES.new($KEY, AES.MODE_GCM, nonce=$NONCE)
+      - patterns:
+          - pattern: |
+              $NONCE = b"\x00" * $N
+              ...
+              AES.new($KEY, AES.MODE_GCM, nonce=$NONCE)
+      # Hardcoded nonce trực tiếp
+      - pattern: AES.new($KEY, AES.MODE_GCM, nonce=b"...")
+      - pattern: $AESGCM.encrypt(b"...", ...)
+      # cryptography.hazmat: modes.GCM(static_nonce) — variable assigned from literal
+      - patterns:
+          - pattern: |
+              $NONCE = b"..."
+              ...
+              modes.GCM($NONCE)
+      - patterns:
+          - pattern: |
+              $NONCE = b"\x00" * $N
+              ...
+              modes.GCM($NONCE)
+      # Hardcoded nonce literal passed directly to modes.GCM
+      - pattern: modes.GCM(b"...")
+      - pattern: Cipher($ALG, modes.GCM(b"..."), ...)
+
+  # ============================================
+  # 13. JWT ALGORITHM CONFUSION — HS256 with RS256 key
+  # ============================================
+  - id: security-jwt-hs256-confusion
+    metadata:
+      cwe: ["CWE-347: Improper Verification of Cryptographic Signature"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/auth.md"]
+    message: |
+      JWT với algorithms=["HS256"] khi server publish JWKS (RS256) =
+      kẻ tấn công có thể dùng public key làm HMAC secret. BẮT BUỘC explicit RS256.
+    severity: WARNING
+    languages: [python, javascript]
+    patterns:
+      - pattern: jwt.decode(...)
+      - pattern-regex: 'algorithms\s*=\s*\[\s*["\x27]HS256["\x27]\s*\]'
+
+  # ============================================
+  # 14. JWT HEADER INJECTION — jwk / jku / x5u
+  # ============================================
+  - id: security-jwt-header-key-injection
+    metadata:
+      cwe: ["CWE-347: Improper Verification of Cryptographic Signature"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/auth.md"]
+    message: |
+      KHÔNG tin header jwk/jku/x5u — chống public key injection.
+      Luôn lookup signing key theo `kid` từ JWKS endpoint đã trust.
+    severity: WARNING
+    languages: [python]
+    pattern-regex: 'jwt\.decode\([^)]*options\s*=\s*\{[^}]*["\x27](verify_jwk|verify_jku)["\x27]\s*:\s*True'
+
+  # ============================================
+  # 15. PII REGION MISMATCH — KYC bucket must NOT be ap-southeast-1
+  # ============================================
+  - id: security-pii-singapore-region
+    metadata:
+      cwe: ["CWE-359: Exposure of Private Personal Information"]
+      owasp: ["A04:2021 - Insecure Design"]
+      category: security
+      confidence: HIGH
+      references: ["docs/data-protection.md"]
+      compliance: ["Nghị định 356/2025/NĐ-CP — PII phải lưu tại Z4 (VPC-VN)"]
+    message: |
+      PII/KYC bucket dùng region="ap-southeast-1" (Singapore) = vi phạm NĐ 356/2025.
+      PII của user VN phải lưu tại Z4 (VPC-VN) — on-prem tại Việt Nam. Dùng private storage nội địa hoặc đổi sang bucket non-PII.
+    severity: ERROR
+    languages: [python]
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $S3 = boto3.client("s3", region_name="ap-southeast-1")
+              ...
+              $S3.put_object(Bucket=$BUCKET, ...)
+          - pattern: |
+              boto3.client("s3", region_name="ap-southeast-1").put_object(Bucket=$BUCKET, ...)
+      - metavariable-regex:
+          metavariable: $BUCKET
+          regex: '(?i).*(kyc|pii|cccd|selfie|biometric|customer-?id).*'
+
+  # ============================================
+  # 16. SUBPROCESS LONG-LIVED SESSION TOKEN (Bybit 2025 pattern)
+  # ============================================
+  - id: security-aws-long-session-token
+    metadata:
+      cwe: ["CWE-613: Insufficient Session Expiration"]
+      owasp: ["A07:2021 - Identification and Authentication Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/infra.md"]
+    message: |
+      Session token > 1h không cần thiết — xem Bybit 2025 (12h token bị steal qua phishing).
+      Dùng IRSA cho service-to-service hoặc giảm duration ≤ 3600s cho human session.
+    severity: WARNING
+    languages: [python, javascript]
+    pattern-regex: 'duration[-_]?seconds[^0-9]{0,10}(?:43200|28800|21600|14400|10800|7200)\b'
+
+  # ============================================
+  # 17. PICKLE/YAML IN HTTP HANDLER — Mixin 2023 pattern
+  # ============================================
+  - id: security-yaml-load-in-handler
+    metadata:
+      cwe: ["CWE-502: Deserialization of Untrusted Data"]
+      owasp: ["A08:2021 - Software and Data Integrity Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/secure-checklist.md"]
+    message: |
+      yaml.load() không SafeLoader trong HTTP handler = RCE (xem Mixin Network 2023).
+      Dùng yaml.safe_load() hoặc json.
+    severity: ERROR
+    languages: [python]
+    patterns:
+      - pattern-either:
+          - pattern: yaml.load($DATA)
+          - pattern: yaml.load($DATA, Loader=yaml.Loader)
+          - pattern: yaml.load($DATA, Loader=yaml.FullLoader)
+      - pattern-not: yaml.load($DATA, Loader=yaml.SafeLoader)
+      - pattern-not: yaml.load($DATA, Loader=SafeLoader)
+
+  # ============================================
+  # 18. SQL INJECTION — JavaScript/TypeScript template literal
+  # ============================================
+  - id: security-sql-injection-js
+    metadata:
+      cwe: ["CWE-89: SQL Injection"]
+      owasp: ["A03:2021 - Injection"]
+      category: security
+      confidence: HIGH
+      references: ["docs/database.md"]
+    message: |
+      Template literal vào SQL = SQL Injection.
+      Dùng parameterized query: db.query('SELECT ... WHERE id = $1', [id]).
+    severity: ERROR
+    languages: [javascript, typescript]
+    pattern-either:
+      - pattern: $DB.query(`...${ $VAR }...`)
+      - pattern: $DB.execute(`...${ $VAR }...`)
+      - pattern: $DB.raw(`...${ $VAR }...`)
+      - patterns:
+          - pattern: $Q = `...${ $VAR }...`
+          - pattern-regex: '(?i)`[^`]*(SELECT|INSERT|UPDATE|DELETE)\s'
+          - pattern-inside: |
+              $DB.query($Q)
+
+  # ============================================
+  # 19. JWT VERIFY DISABLED — JavaScript/TypeScript
+  # ============================================
+  - id: security-jwt-verify-disabled-js
+    metadata:
+      cwe: ["CWE-347: Improper Verification of Cryptographic Signature"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/auth.md"]
+    message: |
+      jwt.verify() với algorithms: ["none"] hoặc ignoreExpiration = bypass auth.
+      Luôn verify signature và expiration.
+    severity: ERROR
+    languages: [javascript, typescript]
+    pattern-either:
+      - patterns:
+          - pattern: jwt.verify($TOKEN, $SECRET, $OPTIONS, ...)
+          - metavariable-regex:
+              metavariable: $OPTIONS
+              regex: '(?i)algorithms.*none|ignoreExpiration.*true'
+      - pattern: "jwt.decode($TOKEN, { complete: true })"
+      - patterns:
+          - pattern: jwt.verify(...)
+          - pattern-regex: '["''"]none["''"]'
+
+  # ============================================
+  # 20. HARDCODED FALLBACK SECRET — os.environ.get()
+  # ============================================
+  - id: security-env-hardcoded-fallback
+    metadata:
+      cwe: ["CWE-798: Use of Hard-coded Credentials"]
+      owasp: ["A05:2021 - Security Misconfiguration"]
+      category: security
+      confidence: HIGH
+      references: ["docs/crypto.md"]
+    message: |
+      os.environ.get("SECRET_KEY", "hardcoded_value") — fallback cứng = secret lọt production khi biến env chưa set.
+      Dùng: os.environ["SECRET_KEY"] (raise KeyError nếu thiếu) hoặc thêm startup validation.
+    severity: WARNING
+    languages: [python]
+    patterns:
+      - pattern: os.environ.get($KEY, $DEFAULT)
+      # pattern-regex vì metavariable-regex không áp lên string literal node trong Semgrep 1.x
+      - pattern-regex: 'os\.environ\.get\(\s*["\x27][^"'']*(?i:secret|password|api_?key|token|jwt|private_?key|signing_?key|db_?pass)[^"'']*["\x27]\s*,\s*["\x27].{4,}["\x27]'
+
+  # ============================================
+  # 21. FLOAT PARAMETER FOR MONETARY VALUES
+  # ============================================
+  - id: security-float-param-monetary
+    metadata:
+      cwe: ["CWE-682: Incorrect Calculation"]
+      owasp: ["A04:2021 - Insecure Design"]
+      category: security
+      confidence: HIGH
+      references: ["docs/wallet.md"]
+    message: |
+      Tham số `amount/balance/price/fee: float` trong function → precision loss khi nhận từ HTTP/JSON.
+      Dùng Decimal hoặc nhận str rồi convert: Decimal(str(value)).
+    severity: WARNING
+    languages: [python]
+    patterns:
+      - pattern: "def $FUNC(..., $PARAM: float, ...): ..."
+      - metavariable-regex:
+          metavariable: $PARAM
+          regex: '(?i)(amount|balance|price|fee|total|value|withdraw|deposit)'
+
+  # ============================================
+  # 22. HARDCODED ENCRYPTION KEY (bytes literal)
+  # ============================================
+  - id: security-hardcoded-crypto-key
+    metadata:
+      cwe: ["CWE-321: Use of Hard-coded Cryptographic Key"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/crypto.md"]
+    message: |
+      AES/HMAC key hardcoded trong source code. Khi repo bị leak, toàn bộ dữ liệu mã hoá bị compromise.
+      Dùng AWS KMS / Secrets Manager / IRSA để lấy key runtime.
+    severity: ERROR
+    languages: [python, kotlin, swift]
+    pattern-either:
+      # Bytes literal key — e.g. AES_KEY = b"hardcoded-key-16"
+      - patterns:
+          - pattern: $VAR = b"$VALUE"
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: '(?i)(aes_?key|hmac_?key|encrypt_?key|decrypt_?key|cipher_?key|master_?key|signing_?key|secret_?key)'
+          - metavariable-regex:
+              metavariable: $VALUE
+              regex: '^.{8,}$'
+      # String key — e.g. KEY = "aaabbbccc..."
+      - patterns:
+          - pattern: $VAR = "$VALUE"
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: '(?i)(aes_?key|hmac_?key|encrypt_?key|decrypt_?key|cipher_?key|master_?key)'
+          - metavariable-regex:
+              metavariable: $VALUE
+              regex: '^.{16,}$'
+
+  # ============================================
+  # 23. WEAK HASH FOR PASSWORD
+  # ============================================
+  - id: security-sha256-for-password
+    metadata:
+      cwe: ["CWE-916: Use of Password Hash With Insufficient Computational Effort"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/auth.md"]
+    message: |
+      SHA-256/SHA-512 KHÔNG phải password hashing — quá nhanh để brute force.
+      Dùng Argon2id: `from argon2 import PasswordHasher; ph = PasswordHasher(time_cost=3, memory_cost=65536)`
+    severity: ERROR
+    languages: [python]
+    # pattern-regex vì metavariable-regex không capture được $VAR trong chained call
+    # (hashlib.$HASH($VAR.encode(...)) — $VAR empty trong Semgrep 1.163.x)
+    pattern-regex: 'hashlib\.(sha256|sha512|sha384|sha3_256|sha3_512)\(\s*\w*(?i:password|passwd|pwd|pass)\w*\s*(?:\.encode\(|,|\))'
+
+  # ============================================
+  # 24. EVAL / EXEC WITH DYNAMIC INPUT — RCE
+  # ============================================
+  - id: security-eval-injection
+    metadata:
+      cwe: ["CWE-95: Eval Injection"]
+      owasp: ["A03:2021 - Injection"]
+      category: security
+      confidence: HIGH
+      references: ["docs/secure-checklist.md"]
+    message: |
+      eval() / exec() với input động = Remote Code Execution (RCE).
+      Thay bằng dispatch table (dict mapping → function) hoặc ast.literal_eval() cho data parsing.
+      Không có use case hợp lệ cho eval() trong production code của CEX.
+    severity: ERROR
+    languages: [python]
+    pattern-either:
+      # eval/exec với f-string — luôn có input động
+      - pattern: eval(f"...")
+      - pattern: exec(f"...")
+      # eval/exec với string concatenation
+      - pattern: eval($X + $Y)
+      - pattern: exec($X + $Y)
+      # eval/exec với .format() substitution
+      - pattern: eval($X.format(...))
+      - pattern: exec($X.format(...))
+      # eval/exec với biến không phải constant (bắt các case còn lại)
+      - patterns:
+          - pattern: eval($VAR)
+          - pattern-not: eval("...")
+      - patterns:
+          - pattern: exec($VAR)
+          - pattern-not: exec("...")
+
+  # ============================================
+  # 19. JS/TS — COMMAND INJECTION
+  # ============================================
+  - id: security-command-injection-js
+    metadata:
+      cwe: ["CWE-78: OS Command Injection"]
+      owasp: ["A03:2021 - Injection"]
+      category: security
+      confidence: HIGH
+      references: ["docs/secure-checklist.md"]
+    message: |
+      Command injection trong Node.js — exec/execSync luôn chạy qua shell.
+      Dùng execFile() với args array (không shell). Không pass user input làm command.
+    severity: ERROR
+    languages: [javascript, typescript]
+    pattern-either:
+      - patterns:
+          - pattern-either:
+              - pattern: exec($CMD)
+              - pattern: exec($CMD, ...)
+          - pattern-not: exec("...")
+          - pattern-not: exec('...')
+      - patterns:
+          - pattern-either:
+              - pattern: execSync($CMD)
+              - pattern: execSync($CMD, ...)
+          - pattern-not: execSync("...")
+          - pattern-not: execSync('...')
+      - pattern: "spawn($CMD, $ARGS, {shell: true, ...})"
+      - pattern: "spawn($CMD, $ARGS, {..., shell: true})"
+      - pattern: "spawnSync($CMD, $ARGS, {shell: true, ...})"
+
+  # ============================================
+  # 20. JS/TS — EVAL / CODE INJECTION
+  # ============================================
+  - id: security-eval-injection-js
+    metadata:
+      cwe: ["CWE-95: Eval Injection"]
+      owasp: ["A03:2021 - Injection"]
+      category: security
+      confidence: HIGH
+      references: ["docs/secure-checklist.md"]
+    message: |
+      eval() / new Function() với input động → RCE.
+      Không có use case hợp lệ trong production code của CEX.
+    severity: ERROR
+    languages: [javascript, typescript]
+    pattern-either:
+      - patterns:
+          - pattern: eval($CODE)
+          - pattern-not: eval("...")
+          - pattern-not: eval('...')
+      - patterns:
+          - pattern: new Function($CODE)
+          - pattern-not: new Function("...")
+          - pattern-not: new Function('...')
+      - pattern: new Function($A, $CODE)
+
+  # ============================================
+  # 21. JS/TS — WEAK HASH
+  # ============================================
+  - id: security-weak-hash-js
+    metadata:
+      cwe: ["CWE-328: Use of Weak Hash"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/crypto.md"]
+    message: |
+      MD5/SHA-1 không phù hợp cho bất kỳ mục đích bảo mật nào.
+      Checksum: crypto.createHash('sha256'). Password: argon2.hash() / bcrypt.hash().
+    severity: ERROR
+    languages: [javascript, typescript]
+    pattern-either:
+      - pattern: $C.createHash("md5")
+      - pattern: $C.createHash('md5')
+      - pattern: $C.createHash("sha1")
+      - pattern: $C.createHash('sha1')
+      - pattern: $C.createHash("MD5")
+      - pattern: $C.createHash("SHA-1")
+      - pattern: $C.createHash('SHA-1')
+
+  # ============================================
+  # 22. JS/TS — SHA256 FOR PASSWORD
+  # ============================================
+  - id: security-sha256-password-js
+    metadata:
+      cwe: ["CWE-916: Use of Password Hash With Insufficient Computational Effort"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/auth.md"]
+    message: |
+      SHA-256 không an toàn để hash password — GPU brute-force hàng tỷ hash/giây.
+      Dùng argon2.hash(password) hoặc bcrypt.hash(password, 12).
+    severity: ERROR
+    languages: [javascript, typescript]
+    pattern-either:
+      - patterns:
+          - pattern: $C.createHash("sha256").update($VAR)
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: '(?i)(?:^|.*_)(password|pwd|passwd|pass)(?:_.*|$)'
+      - patterns:
+          - pattern: $C.createHash('sha256').update($VAR)
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: '(?i)(?:^|.*_)(password|pwd|passwd|pass)(?:_.*|$)'
+
+  # ============================================
+  # 23. JS/TS — AES-ECB MODE
+  # ============================================
+  - id: security-aes-ecb-js
+    metadata:
+      cwe: ["CWE-327: Use of a Broken or Risky Cryptographic Algorithm"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/crypto.md"]
+    message: |
+      AES-ECB không có semantic security — các block giống nhau encrypt ra ciphertext giống nhau.
+      Dùng AES-256-GCM: crypto.createCipheriv('aes-256-gcm', key, iv).
+    severity: WARNING
+    languages: [javascript, typescript]
+    patterns:
+      - pattern: $C.createCipheriv($MODE, ...)
+      - metavariable-regex:
+          metavariable: $MODE
+          regex: '(?i).*ecb.*'
+
+  # ============================================
+  # 24. JS/TS — STATIC IV / ZERO NONCE
+  # ============================================
+  - id: security-static-iv-js
+    metadata:
+      cwe: ["CWE-329: Generation of Predictable IV with CBC Mode"]
+      owasp: ["A02:2021 - Cryptographic Failures"]
+      category: security
+      confidence: HIGH
+      references: ["docs/crypto.md"]
+    message: |
+      Static IV / zero-initialized buffer dùng làm nonce AES-GCM → plaintext recovery attack.
+      Dùng crypto.randomBytes(12) cho GCM nonce, crypto.randomBytes(16) cho CBC IV.
+    severity: WARNING
+    languages: [javascript, typescript]
+    pattern-either:
+      - patterns:
+          - pattern: $VAR = Buffer.alloc($N)
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: '(?i)(?:^|.*_)(iv|nonce|counter)(?:_.*|$)'
+      - patterns:
+          - pattern: const $VAR = Buffer.alloc($N)
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: '(?i)(?:^|.*_)(iv|nonce|counter)(?:_.*|$)'
+      - patterns:
+          - pattern: let $VAR = Buffer.alloc($N)
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: '(?i)(?:^|.*_)(iv|nonce|counter)(?:_.*|$)'
+
+  # ============================================
+  # 25. JS/TS — FLOAT FOR MONEY
+  # ============================================
+  - id: security-float-for-money-js
+    metadata:
+      cwe: ["CWE-682: Incorrect Calculation"]
+      owasp: ["A04:2021 - Insecure Design"]
+      category: security
+      confidence: HIGH
+      references: ["docs/wallet.md"]
+    message: |
+      parseFloat()/Number() cho monetary value → precision loss. 0.1 + 0.2 !== 0.3 trong JS.
+      Dùng decimal.js hoặc bignumber.js: new Decimal(amount).
+    severity: WARNING
+    languages: [javascript, typescript]
+    pattern-either:
+      - patterns:
+          - pattern: parseFloat($VAR)
+          - metavariable-regex:
+              metavariable: $VAR
+              # camelCase + snake_case + member access: amountStr, req.body.amount, total_fee
+              regex: '(?i)(?:^|.*[_.A-Z])(amount|fee|balance|price|total|cost|payment|withdraw|deposit)(?:[_.A-Z].*|$)'
+      - patterns:
+          - pattern: Number($VAR)
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: '(?i)(?:^|.*[_.A-Z])(amount|fee|balance|price|total|cost|payment|withdraw|deposit)(?:[_.A-Z].*|$)'
+
+  # ============================================
+  # 26. ANDROID (KOTLIN) — WEAK HASH
+  # ============================================
+  - id: security-weak-hash-android
+    metadata:
+      cwe: ["CWE-328: Use of Weak Hash"]
+      owasp: ["OWASP Mobile M10:2024 - Insufficient Cryptography"]
+      category: security
+      confidence: HIGH
+      references: ["docs/mobile.md"]
+    message: |
+      MD5/SHA-1 không an toàn cho bất kỳ mục đích bảo mật nào.
+      Password: dùng Argon2/bcrypt qua server-side API. Checksum: MessageDigest.getInstance("SHA-256").
+    severity: ERROR
+    languages: [kotlin, java]
+    pattern-either:
+      - pattern: MessageDigest.getInstance("MD5")
+      - pattern: MessageDigest.getInstance("SHA-1")
+      - pattern: MessageDigest.getInstance("SHA1")
+
+  # ============================================
+  # 27. ANDROID (KOTLIN) — SQL INJECTION
+  # ============================================
+  - id: security-sql-injection-android
+    metadata:
+      cwe: ["CWE-89: SQL Injection"]
+      owasp: ["A03:2021 - Injection"]
+      category: security
+      confidence: HIGH
+      references: ["docs/mobile.md"]
+    message: |
+      SQL Injection trong Android SQLiteDatabase.rawQuery() với string template/concatenation.
+      Dùng rawQuery("SELECT ... WHERE id = ?", arrayOf(userId)).
+    severity: ERROR
+    languages: [kotlin, java]
+    pattern-either:
+      - patterns:
+          - pattern: $DB.rawQuery($SQL, ...)
+          - pattern-not: $DB.rawQuery("...", ...)
+      - pattern: $DB.rawQuery($A + $B, ...)
+      - pattern: $DB.execSQL($A + $B)
+      - patterns:
+          - pattern: $DB.execSQL($SQL)
+          - pattern-not: $DB.execSQL("...")
+
+  # ============================================
+  # 28. ANDROID (KOTLIN) — LOG SENSITIVE DATA
+  # ============================================
+  - id: security-log-sensitive-android
+    metadata:
+      cwe: ["CWE-532: Insertion of Sensitive Information into Log File"]
+      owasp: ["OWASP Mobile M6:2024 - Inadequate Privacy Controls"]
+      category: security
+      confidence: HIGH
+      references: ["docs/mobile.md"]
+    message: |
+      Log.d/e/i/v ghi password/token/secret ra Logcat — có thể bị đọc bởi app khác hoặc ADB.
+      Mask hoặc loại bỏ trước khi log. Không log dữ liệu nhạy cảm trong bất kỳ level nào.
+    severity: WARNING
+    languages: [kotlin, java]
+    patterns:
+      - pattern: Log.$LEVEL($TAG, $MSG, ...)
+      - metavariable-regex:
+          metavariable: $MSG
+          regex: '(?i).*(password|passwd|token|secret|otp|pin|api.?key|cccd|biometric|private.?key|seed).*'
+
+  # ============================================
+  # 29. ANDROID (KOTLIN) — STATIC IV / ZERO NONCE
+  # ============================================
+  - id: security-static-iv-android
+    metadata:
+      cwe: ["CWE-329: Generation of Predictable IV with CBC Mode"]
+      owasp: ["OWASP Mobile M10:2024 - Insufficient Cryptography"]
+      category: security
+      confidence: HIGH
+      references: ["docs/mobile.md"]
+    message: |
+      ByteArray(N) mặc định zero-initialized — dùng làm IV/nonce trong AES-GCM → plaintext recovery.
+      Dùng SecureRandom().nextBytes(iv) để tạo nonce ngẫu nhiên.
+    severity: WARNING
+    languages: [kotlin]
+    patterns:
+      - pattern: $VAR = ByteArray($N)
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: '(?i)(?:^|.*_)(iv|nonce|counter)(?:_.*|$)'
+
+  # ============================================
+  # 30. ANDROID (KOTLIN) — INSECURE RANDOM
+  # ============================================
+  - id: security-weak-random-android
+    metadata:
+      cwe: ["CWE-338: Use of Cryptographically Weak PRNG"]
+      owasp: ["OWASP Mobile M10:2024 - Insufficient Cryptography"]
+      category: security
+      confidence: HIGH
+      references: ["docs/mobile.md"]
+    message: |
+      java.util.Random không cryptographically secure — không dùng cho OTP, token, salt.
+      Dùng java.security.SecureRandom() cho mọi mục đích bảo mật.
+    severity: WARNING
+    languages: [kotlin, java]
+    pattern-either:
+      - pattern: java.util.Random()
+      - pattern: java.util.Random($SEED)
+      - pattern: new Random()
+
+  # ============================================
+  # 31. ANDROID (KOTLIN) — INSECURE SHAREDPREFS
+  # ============================================
+  - id: security-insecure-prefs-android
+    metadata:
+      cwe: ["CWE-922: Insecure Storage of Sensitive Information"]
+      owasp: ["OWASP Mobile M9:2024 - Insecure Data Storage"]
+      category: security
+      confidence: HIGH
+      references: ["docs/mobile.md"]
+    message: |
+      SharedPreferences lưu token/secret/password dưới dạng plaintext trong bộ nhớ thiết bị.
+      Dùng EncryptedSharedPreferences (Jetpack Security) hoặc Android Keystore.
+    severity: WARNING
+    languages: [kotlin, java]
+    patterns:
+      - pattern: $PREFS.edit().putString($KEY, $VALUE)
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: '(?i).*(token|secret|password|pwd|pin|otp|api.?key|private.?key|session|auth).*'
+
+  # ============================================
+  # 32. iOS (SWIFT) — WEAK HASH
+  # ============================================
+  - id: security-weak-hash-ios
+    metadata:
+      cwe: ["CWE-328: Use of Weak Hash"]
+      owasp: ["OWASP Mobile M10:2024 - Insufficient Cryptography"]
+      category: security
+      confidence: HIGH
+      references: ["docs/mobile.md"]
+    message: |
+      CC_MD5/CC_SHA1 không an toàn cho mục đích bảo mật.
+      Checksum: CC_SHA256. Password: gọi API server-side dùng Argon2/bcrypt.
+    severity: ERROR
+    languages: [swift]
+    pattern-either:
+      - pattern: CC_MD5(...)
+      - pattern: CC_SHA1(...)
+
+  # ============================================
+  # 33. iOS (SWIFT) — INSECURE KEYCHAIN ACCESS
+  # ============================================
+  - id: security-insecure-keychain-ios
+    metadata:
+      cwe: ["CWE-922: Insecure Storage of Sensitive Information"]
+      owasp: ["OWASP Mobile M9:2024 - Insecure Data Storage"]
+      category: security
+      confidence: HIGH
+      references: ["docs/mobile.md"]
+    message: |
+      kSecAttrAccessibleAlways cho phép Keychain item được đọc kể cả khi thiết bị locked.
+      Dùng kSecAttrAccessibleWhenUnlockedThisDeviceOnly cho private key / session token.
+    severity: WARNING
+    languages: [swift]
+    pattern: kSecAttrAccessibleAlways
+
+  # ============================================
+  # 34. iOS (SWIFT) — LOG SENSITIVE DATA
+  # ============================================
+  - id: security-log-sensitive-ios
+    metadata:
+      cwe: ["CWE-532: Insertion of Sensitive Information into Log File"]
+      owasp: ["OWASP Mobile M6:2024 - Inadequate Privacy Controls"]
+      category: security
+      confidence: HIGH
+      references: ["docs/mobile.md"]
+    message: |
+      print()/NSLog() với password/token → lộ ra Console.app và có thể harvest qua syslog.
+      Mask sensitive fields hoặc dùng os_log với privacy: .private.
+    severity: WARNING
+    languages: [swift]
+    pattern-either:
+      - patterns:
+          - pattern: print($MSG, ...)
+          - metavariable-regex:
+              metavariable: $MSG
+              regex: '(?i).*(password|passwd|token|secret|otp|pin|api.?key|cccd|biometric|seed).*'
+      - patterns:
+          - pattern: NSLog($FMT, ...)
+          - metavariable-regex:
+              metavariable: $FMT
+              regex: '(?i).*(password|passwd|token|secret|otp|pin|api.?key).*'
+
+  # ============================================
+  # 35. iOS (SWIFT) — STATIC IV / ZERO DATA
+  # ============================================
+  - id: security-static-iv-ios
+    metadata:
+      cwe: ["CWE-329: Generation of Predictable IV with CBC Mode"]
+      owasp: ["OWASP Mobile M10:2024 - Insufficient Cryptography"]
+      category: security
+      confidence: HIGH
+      references: ["docs/mobile.md"]
+    message: |
+      Data(count: N) tạo buffer zero-byte — dùng làm IV/nonce trong AES-GCM → plaintext recovery.
+      Dùng var iv = Data(count: 12); _ = iv.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 12, $0.baseAddress!) }
+    severity: WARNING
+    languages: [swift]
+    patterns:
+      - pattern: "$VAR = Data(count: $N)"
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: '(?i)(?:^|.*_)(iv|nonce|counter)(?:_.*|$)'
+
+  # ============================================
+  # 36. iOS (SWIFT) — INSECURE RANDOM
+  # ============================================
+  - id: security-weak-random-ios
+    metadata:
+      cwe: ["CWE-338: Use of Cryptographically Weak PRNG"]
+      owasp: ["OWASP Mobile M10:2024 - Insufficient Cryptography"]
+      category: security
+      confidence: HIGH
+      references: ["docs/mobile.md"]
+    message: |
+      rand()/random() không cryptographically secure — không dùng cho OTP, token, nonce.
+      Dùng SecRandomCopyBytes(kSecRandomDefault, count, &buffer) cho mục đích bảo mật.
+    severity: WARNING
+    languages: [swift]
+    pattern-either:
+      - pattern: rand()
+      - pattern: random()
+      - pattern: drand48()
+      - pattern: arc4random()

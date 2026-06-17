@@ -1,0 +1,44 @@
+# AI PR Security Review — v0.1 (MVP)
+#
+# Claude API đọc diff của PR và comment security findings.
+# Policy: AI CHỈ ĐỀ XUẤT — không block PR, không merge. Human verify & approve.
+#
+# Data privacy:
+#   - Chỉ gửi diff của PR (không gửi toàn bộ repo)
+#   - Secret-like strings được mask trước khi gửi
+#   - Anthropic API không dùng dữ liệu khách hàng để train model
+#
+# Setup: Settings → Secrets and variables → Actions → ANTHROPIC_API_KEY
+# (thiếu secret → job skip nhẹ nhàng, không fail)
+
+name: AI Security Review
+
+on:
+  pull_request:
+    branches: ["**"]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ai-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ai-review:
+    name: AI Review (Claude)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true   # AI review không bao giờ block PR
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Run AI review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          pip install anthropic -q
+          python scripts/ai_pr_review.py

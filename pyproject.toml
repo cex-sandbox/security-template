@@ -1,0 +1,4 @@
+[tool.bandit]
+targets = ["."]
+skips = []
+exclude_dirs = ["node_modules", ".venv", "venv", "__pycache__", "security/.semgrep/rules/community", ".semgrep/rules/community"]
