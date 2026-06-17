@@ -17,4 +17,8 @@ paths = [
     '''.*\.backup-\d+(/.*)?$''',
     # CI test fixtures — intentionally vulnerable code for testing rules
     '''(^|.*/)tests/ci/.*''',
+    # Test runner — cố tình tạo token giả để kiểm tra gitleaks phát hiện
+    '''(^|.*/)scripts/test-ci-local\.sh$''',
+    # Docs — chứa secret mẫu minh hoạ "code lỗi"
+    '''(^|.*/)docs/guide\.md$''',
 ]
