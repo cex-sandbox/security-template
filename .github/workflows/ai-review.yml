@@ -36,9 +36,14 @@ jobs:
 
       - name: Run AI review
         env:
+          # Bedrock (ưu tiên nếu có) — token tự nhận qua AWS_BEARER_TOKEN_BEDROCK
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          BOT_MODEL: ${{ vars.BOT_MODEL }}
+          # Anthropic API (fallback nếu không có Bedrock token)
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          pip install anthropic -q
+          pip install "anthropic[bedrock]" -q
           python scripts/ai_pr_review.py

@@ -25,7 +25,9 @@ import urllib.request
 
 import anthropic
 
-MODEL = "claude-opus-4-8"
+# Model mặc định theo provider (ghi đè bằng env BOT_MODEL nếu cần)
+DEFAULT_MODEL_BEDROCK = "us.anthropic.claude-sonnet-4-6"   # CRIS regional, hợp us-east-1
+DEFAULT_MODEL_ANTHROPIC = "claude-opus-4-8"                 # API first-party
 MAX_DIFF_BYTES = 150_000  # ~40k tokens — diff lớn hơn sẽ bị cắt và ghi chú rõ trong comment
 MAX_OUTPUT_TOKENS = 8_000
 
@@ -83,9 +85,22 @@ def github_api(url: str, token: str, accept: str = "application/vnd.github+json"
 
 
 def main() -> int:
+    # Chọn provider: ưu tiên Bedrock (bearer token), fallback Anthropic API.
+    # Cả hai dùng chung Messages API — chỉ khác client + model id.
+    bedrock_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        print("⏭ ANTHROPIC_API_KEY chưa cấu hình — bỏ qua AI review (không fail pipeline)")
+    if bedrock_token:
+        from anthropic import AnthropicBedrock
+        # Token tự nhận qua env AWS_BEARER_TOKEN_BEDROCK; chỉ cần aws_region
+        client = AnthropicBedrock(aws_region=os.environ.get("AWS_REGION", "us-east-1"))
+        model = os.environ.get("BOT_MODEL", DEFAULT_MODEL_BEDROCK)
+        print(f"→ Provider: Amazon Bedrock · model {model}")
+    elif api_key:
+        client = anthropic.Anthropic(api_key=api_key)
+        model = os.environ.get("BOT_MODEL", DEFAULT_MODEL_ANTHROPIC)
+        print(f"→ Provider: Anthropic API · model {model}")
+    else:
+        print("⏭ Chưa cấu hình AWS_BEARER_TOKEN_BEDROCK hoặc ANTHROPIC_API_KEY — bỏ qua AI review (không fail pipeline)")
         return 0
 
     gh_token = os.environ["GITHUB_TOKEN"]
@@ -106,14 +121,13 @@ def main() -> int:
     # 2. Mask secrets trước khi gửi ra ngoài
     diff = mask_secrets(diff)
 
-    # 3. Gọi Claude API
-    client = anthropic.Anthropic(api_key=api_key)
+    # 3. Gọi Claude (qua client đã chọn ở trên)
     user_content = f"Diff của PR #{pr_number} (repo {repo}):\n\n```diff\n{diff}\n```"
     if truncated:
         user_content += "\n\n(Lưu ý: diff đã bị cắt do vượt giới hạn kích thước — chỉ review phần trên.)"
 
     response = client.messages.create(
-        model=MODEL,
+        model=model,
         max_tokens=MAX_OUTPUT_TOKENS,
         thinking={"type": "adaptive"},
         system=SYSTEM_PROMPT,
